@@ -19,7 +19,10 @@ def docScour(filename, color):
             skipped = 1
             while (currentRun.font.color.rgb == colorI):
                 text2add += currentRun.text
-                currentRun = para.runs[count+1]
+                try:
+                    currentRun = para.runs[count+1]
+                except:
+                    break
                 count+=1
             if(len(text2add) > 0):
                 fullText.append(text2add)
@@ -29,21 +32,24 @@ def docScour(filename, color):
 
 
 def card2numb(img):
-    baseurl = "https://api.scryfall.com/cards/named?fuzzy="
+    baseurl = "https://api.scryfall.com/cards/named?exact="
     first_response = get(baseurl + img, timeout=5)
     response_list = first_response.json()
     #print(response_list)
-    #print(response_list['image_uris']['png'])
-    if(response_list['object'] == "error"):
+    if (response_list['object'] == "error"):
         print("Error: Bad Token: " + img)
         return "error"
+    elif 'card_faces' in response_list.keys():
+        #print(response_list['card_faces'][0])
+        return (response_list['card_faces'][0]['image_uris']['png'] + '%' + response_list['card_faces'][1]['image_uris']['png']), (response_list['id'])
     else:
         return (response_list['image_uris']['png'], response_list['id'])
 
 
 if __name__ == '__main__':
+
     scriptname = input("Script name:")
-    scriptwithExt = scriptname + ".docx"
+    scriptwithExt = "script/" + scriptname + ".docx"
     fnameImg = "img/"
     #fscript = scriptname + "/"
     color = "(255, 0, 0)"
@@ -62,18 +68,36 @@ if __name__ == '__main__':
             #print(fnameImg + scriptname + "/" + i.lstrip().rstrip() + ".png")
             #print(not (os.path.exists(fnameImg + scriptname + "/" + i.lstrip().rstrip() + ".png")))
             if not (os.path.exists(fnameImg + scriptname + "/" + i.lstrip().rstrip() + ".png")):
-                if card2numb(i)[1] in idcheck:
+                cardurl, cardid = card2numb(i)
+                if cardid in idcheck:
                     pass
+                elif '%' in cardurl:
+                    cardurl1, cardurl2 = cardurl.split('%')
+                    print("Downloading double faced card " + i.lstrip().rstrip() + "...")
+
+                    response = get(cardurl1, stream=True)
+                    response.raw.decode_content = True
+
+                    with open(fnameImg + scriptname + "/" + i + " Front.png", 'wb') as f:
+                        copyfileobj(response.raw, f)
+
+                    response2 = get(cardurl2, stream=True)
+                    response2.raw.decode_content = True
+
+                    with open(fnameImg + scriptname + "/" + i + " Back.png", 'wb') as f:
+                        copyfileobj(response2.raw, f)
+
+                    idcheck.append(cardid)
+
                 else:
                     print("Downloading " + i.lstrip().rstrip() + "...")
-                    url = card2numb(i)[0]
-                    response = get(url, stream=True)
+                    response = get(cardurl, stream=True)
                     response.raw.decode_content = True
 
                     with open(fnameImg + scriptname + "/" + i + ".png", 'wb') as f:
                         copyfileobj(response.raw, f)
 
-                    idcheck.append(card2numb(i)[1])
+                    idcheck.append(cardid)
         except:
             pass
 
