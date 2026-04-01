@@ -1,16 +1,26 @@
+import sys
 import time
+import tempfile
+import subprocess
 from pathlib import Path
-from shutil import copyfileobj
+from shutil import copyfileobj, which
 from urllib.parse import quote
 
 import requests
 from docx import Document
 
 
-API_DELAY_SECONDS = 0.4
-MAX_RETRIES = 10
+API_DELAY_SECONDS = 0.15
+MAX_RETRIES = 3
 BACKOFF_BASE_SECONDS = 1.0
 TARGET_COLOR = (255, 0, 0)
+SUPPORTED_EXTENSIONS = [".docx", ".odt", ".rtf"]
+
+
+def get_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 
 def normalize_color(color: str) -> tuple[int, int, int]:
@@ -86,28 +96,29 @@ def request_with_retry(
         try:
             response = session.get(url, stream=stream, timeout=timeout)
 
-            # Do not retry on not found
             if response.status_code == 404:
                 response.close()
                 raise FileNotFoundError(f"404 Not Found: {url}")
 
-            # Retry on rate limits
             if response.status_code == 429:
                 retry_after = response.headers.get("Retry-After")
                 sleep_for = float(retry_after) if retry_after else BACKOFF_BASE_SECONDS * (2 ** attempt)
                 response.close()
+
                 if attempt == MAX_RETRIES - 1:
                     raise RuntimeError(f"429 Too Many Requests: {url}")
+
                 print(f"Rate limited. Waiting {sleep_for:.1f}s before retrying...")
                 time.sleep(sleep_for)
                 continue
 
-            # Retry on server errors
             if 500 <= response.status_code < 600:
                 sleep_for = BACKOFF_BASE_SECONDS * (2 ** attempt)
                 response.close()
+
                 if attempt == MAX_RETRIES - 1:
                     raise RuntimeError(f"Server error {response.status_code}: {url}")
+
                 print(f"Server error {response.status_code}. Waiting {sleep_for:.1f}s before retrying...")
                 time.sleep(sleep_for)
                 continue
@@ -120,8 +131,10 @@ def request_with_retry(
 
         except requests.RequestException as e:
             last_error = e
+
             if attempt == MAX_RETRIES - 1:
                 break
+
             sleep_for = BACKOFF_BASE_SECONDS * (2 ** attempt)
             print(f"Request failed ({e}). Waiting {sleep_for:.1f}s before retrying...")
             time.sleep(sleep_for)
@@ -158,11 +171,9 @@ def card_to_image_and_id(
     if normalized in cache:
         return cache[normalized]
 
-    # Try exact first
     try:
         data = exact_card_lookup(session, normalized)
     except FileNotFoundError:
-        # Fallback to fuzzy for names pulled from docs that may have punctuation/spacing issues
         data = fuzzy_card_lookup(session, normalized)
 
     if data.get("object") == "error":
@@ -215,22 +226,96 @@ def unique_preserve_order(items: list[str]) -> list[str]:
     return result
 
 
-def main():
-    scriptname = input("Script name: ").strip()
-    script_path = Path("script") / f"{scriptname}.docx"
-    output_dir = Path("img") / scriptname
+def find_input_file(script_dir: Path, scriptname: str) -> Path | None:
+    for ext in SUPPORTED_EXTENSIONS:
+        candidate = script_dir / f"{scriptname}{ext}"
+        if candidate.exists():
+            return candidate
+    return None
 
-    if not script_path.exists():
-        print(f"Could not find file: {script_path}")
+
+def find_soffice() -> str | None:
+    cmd = which("soffice")
+    if cmd:
+        return cmd
+
+    common_windows_paths = [
+        r"C:\Program Files\LibreOffice\program\soffice.exe",
+        r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    ]
+
+    for path in common_windows_paths:
+        if Path(path).exists():
+            return path
+
+    return None
+
+
+def convert_to_docx(input_path: Path) -> Path:
+    suffix = input_path.suffix.lower()
+
+    if suffix == ".docx":
+        return input_path
+
+    if suffix not in {".odt", ".rtf"}:
+        raise ValueError(f"Unsupported input format: {suffix}")
+
+    soffice = find_soffice()
+    if not soffice:
+        raise RuntimeError(
+            "This file is not .docx, and LibreOffice was not found for conversion.\n"
+            "Install LibreOffice or save the file as .docx first."
+        )
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="scriptHelperMagic_"))
+    cmd = [
+        soffice,
+        "--headless",
+        "--convert-to",
+        "docx",
+        "--outdir",
+        str(temp_dir),
+        str(input_path),
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"LibreOffice conversion failed.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+        )
+
+    converted_path = temp_dir / f"{input_path.stem}.docx"
+    if not converted_path.exists():
+        raise RuntimeError("Conversion appeared to succeed, but the .docx output was not found.")
+
+    return converted_path
+
+
+def main():
+    base_dir = get_base_dir()
+    script_dir = base_dir / "script"
+
+    scriptname = input("Script name: ").strip()
+    input_path = find_input_file(script_dir, scriptname)
+    output_dir = base_dir / "img" / scriptname
+
+    if input_path is None:
+        print(f"Could not find input file for: {scriptname}")
+        print(f"Checked in: {script_dir}")
+        print(f"Supported extensions: {', '.join(SUPPORTED_EXTENSIONS)}")
         input("Press Enter to close...")
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        imglist = doc_scour(str(script_path), str(TARGET_COLOR))
+        docx_path = convert_to_docx(input_path)
+        imglist = doc_scour(str(docx_path), str(TARGET_COLOR))
     except Exception as e:
         print(f"Failed to read document: {e}")
+        print(f"Checked path: {input_path}")
+        print("Make sure the file is a real document and, for .odt/.rtf, that LibreOffice is installed.")
         input("Press Enter to close...")
         return
 
