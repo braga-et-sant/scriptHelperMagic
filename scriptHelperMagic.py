@@ -10,7 +10,7 @@ import requests
 from docx import Document
 
 
-API_DELAY_SECONDS = 0.15
+API_DELAY_SECONDS = 0.4
 MAX_RETRIES = 3
 BACKOFF_BASE_SECONDS = 1.0
 TARGET_COLOR = (255, 0, 0)
